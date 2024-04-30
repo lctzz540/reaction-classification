@@ -11,10 +11,9 @@ from utils import get_atom_features, get_bond_features
 
 
 class MolecularGraphDataset(Dataset):
-    def __init__(self, csv_file, split="train", num_classes=None):
+    def __init__(self, csv_file, split="train"):
         self.df = pd.read_csv(csv_file, sep="\t")
         self.df = self.df[self.df["split"] == split]
-        self.num_classes = num_classes
 
     def __len__(self):
         return len(self.df)
@@ -31,6 +30,8 @@ class MolecularGraphDataset(Dataset):
             y_tensor[c] = 1
 
         precursors, products = smiles.split(">>")
+        precursors = precursors.split(".")
+        products = products.split(".")
 
         prec_data = self.process_molecule(precursors)
         prod_data = self.process_molecule(products)
@@ -43,11 +44,12 @@ class MolecularGraphDataset(Dataset):
 
         return prec_data, prod_data, y_tensor
 
-    def process_molecule(self, smiles):
-        mol = Chem.MolFromSmiles(smiles)
+    def process_molecule(self, smiles_list):
+        mol_list = [Chem.MolFromSmiles(smiles) for smiles in smiles_list]
 
-        n_nodes = mol.GetNumAtoms()
-        n_edges = 2 * mol.GetNumBonds()
+        n_nodes_total = sum([mol.GetNumAtoms() for mol in mol_list])
+        n_edges_total = sum([2 * mol.GetNumBonds() for mol in mol_list])
+
         unrelated_smiles = "O=O"
         unrelated_mol = Chem.MolFromSmiles(unrelated_smiles)
         n_node_features = len(get_atom_features(
@@ -56,22 +58,36 @@ class MolecularGraphDataset(Dataset):
             get_bond_features(unrelated_mol.GetBondBetweenAtoms(0, 1))
         )
 
-        X = np.zeros((n_nodes, n_node_features))
+        X = np.zeros((n_nodes_total, n_node_features))
+        EF = np.zeros((n_edges_total, n_edge_features))
+        offset = 0
 
-        for atom in mol.GetAtoms():
-            X[atom.GetIdx(), :] = get_atom_features(atom)
+        for mol in mol_list:
+            n_nodes = mol.GetNumAtoms()
+
+            for atom in mol.GetAtoms():
+                X[offset + atom.GetIdx(), :] = get_atom_features(atom)
+
+            for k, bond in enumerate(mol.GetBonds()):
+                i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                EF[offset +
+                    k] = get_bond_features(mol.GetBondBetweenAtoms(i, j))
+
+            offset += n_nodes
 
         X = torch.tensor(X, dtype=torch.float)
 
-        (rows, cols) = np.nonzero(GetAdjacencyMatrix(mol))
+        adjacency_matrices = [GetAdjacencyMatrix(mol) for mol in mol_list]
+        rows_list, cols_list = zip(
+            *[np.nonzero(adj_mat) for adj_mat in adjacency_matrices]
+        )
+
+        rows = np.concatenate(rows_list)
+        cols = np.concatenate(cols_list)
+
         torch_rows = torch.from_numpy(rows.astype(np.int64)).to(torch.long)
         torch_cols = torch.from_numpy(cols.astype(np.int64)).to(torch.long)
         E = torch.stack([torch_rows, torch_cols], dim=0)
-
-        EF = np.zeros((n_edges, n_edge_features))
-
-        for k, (i, j) in enumerate(zip(rows, cols)):
-            EF[k] = get_bond_features(mol.GetBondBetweenAtoms(int(i), int(j)))
 
         EF = torch.tensor(EF, dtype=torch.float)
 
